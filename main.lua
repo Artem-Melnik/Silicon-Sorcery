@@ -1,195 +1,261 @@
+-- Helper function to find the difference between two points
+local function getDistance(x1, y1, x2, y2)
+    return math.sqrt((x2 - x1)^2 + (y2 - y1)^2)
+end
+
 function love.load()
-    camera = require 'libraries/camera'
-    NPC = require 'libraries/npc'
-    anim8 = require 'libraries/anim8'
-    sti = require 'libraries/sti'
-    narrator = require 'libraries/narrator'
+    -- Get the screen dimensions so we know where to spawn things
+    screenWidth = love.graphics.getWidth()
+    screenHeight = love.graphics.getHeight()
 
-    cam = camera()
+    -- Set custom cursor
+    local customCursor = love.mouse.newCursor("cursor.png", 16, 16)
+    love.mouse.setCursor(customCursor)
 
-    love.graphics.setDefaultFilter("nearest", "nearest")
+    -- Set up the player
+    player = {
+        x = screenWidth / 2,
+        y = screenHeight / 2,
+        rotation = 0,
+        speed = 200,
+        radius = 15,
+        hp = 100,
 
-    gameMap = sti('maps/testMap.lua')
-    gameMap:resize(love.graphics.getWidth()*2, love.graphics.getHeight())
+        vx = 0, -- x velocity
+        vy = 0, -- y velocity
 
-    player = {}
-    player.x = 400
-    player.y = 200
-    player.speed = 5
-    player.spriteSheet = love.graphics.newImage('sprites/player-sheet.png')
-    player.grid = anim8.newGrid( 12, 18, player.spriteSheet:getWidth(), player.spriteSheet:getHeight() )
+        -- Dash variables
+        dashForce = 1200, -- initial burst speed
+        friction = 8, -- how much the player is slowed down
+        dashCooldown = 0, -- Timer for dashing
+        dashDelay = 1.0, -- Time between dashes (in seconds)
 
-    player.animations = {}
-    player.animations.down = anim8.newAnimation( player.grid('1-4', 1), 0.2 )
-    player.animations.left = anim8.newAnimation( player.grid('1-4', 2), 0.2 )
-    player.animations.right = anim8.newAnimation( player.grid('1-4', 3), 0.2 )
-    player.animations.up = anim8.newAnimation( player.grid('1-4', 4), 0.2 )
+    }
 
-    player.anim = player.animations.left
+    -- Lists to keep track of all active objects on screen
+    enemies = {}
+    bullets = {}
 
-    -- character sheet, starting position, wander x, wander y
-    myNPC = NPC.new('sprites/player-sheet.png', 1595, 1065, 80, 0)
-    drNPC = NPC.new('sprites/player-sheet.png', 1700, 230, 50, 50)
+    -- Timers for enemies
+    enemySpawnTimer = 0
+    enemySpawnRate = 0.5 -- Spawn an enemy every x seconds
 
-    -- Narrator: ink + talkies wrapper. See narrator.lua.
-    narrator:init()
+    shootTimer = 0
+    shootRate = 0.5 -- Shoot a bullet every x seconds
 
-    characterBella = narrator:newCharacter("Bella",  "sprites/bella_avatar.png")
-    characterDoc   = narrator:newCharacter("Doctor", "sprites/doctor_avatar.png")
-
-    narrator:bindNPC(myNPC, characterBella, "BellaSaysHello")
-    narrator:bindNPC(drNPC, characterDoc,   "DrSaysHello")
-
-    -- Distance (in world pixels) at which the "E" prompt appears.
-    interactRange = 80
-
-    -- Set when the player is close enough to a bound NPC to interact.
-    nearbyNPC = nil
-
-    -- Font for the floating "E" key prompt.
-    promptFont = love.graphics.newFont(14)
-end
-
--- Check if a world position collides with a tile on the Trees layer
-function treeAt(x, y)
-    local layer = gameMap.layers["Trees"]
-    local tx = math.floor(x / gameMap.tilewidth) + 1
-    local ty = math.floor(y / gameMap.tileheight) + 1
-    return layer.data[ty] and layer.data[ty][tx]
-end
-
--- Find the closest bound NPC within interactRange (or nil).
-function findNearbyNPC()
-    local closest, closestDist = nil, interactRange
-    for _, npc in ipairs(narrator._boundNPCs) do
-        local dx = npc.x - player.x
-        local dy = npc.y - player.y
-        local dist = math.sqrt(dx * dx + dy * dy)
-        if dist <= closestDist then
-            closest, closestDist = npc, dist
-        end
-    end
-    return closest
+    score = 0
 end
 
 function love.update(dt)
-    local dialogueOpen = narrator:isOpen()
+    -- dt is delta time, the time passed since the last frame
+    -- Multiply by dt to make sure that movement is smooth no matter the framerate
 
-    -- Freeze the player while a dialog is on screen so the conversation feels
-    -- grounded. NPCs are paused via narrator:bindNPC's update wrapper.
-    if not dialogueOpen then
-        local isMoving = false
-        local oldX, oldY = player.x, player.y
-
-        if love.keyboard.isDown("right") then
-            player.x = player.x + player.speed
-            player.anim = player.animations.right
-            isMoving = true
-        end
-
-        if love.keyboard.isDown("left") then
-            player.x = player.x - player.speed
-            player.anim = player.animations.left
-            isMoving = true
-        end
-
-        if love.keyboard.isDown("down") then
-            player.y = player.y + player.speed
-            player.anim = player.animations.down
-            isMoving = true
-        end
-
-        if love.keyboard.isDown("up") then
-            player.y = player.y - player.speed
-            player.anim = player.animations.up
-            isMoving = true
-        end
-
-        -- Collision: check each axis separately so player slides along walls
-        if treeAt(player.x, oldY) then player.x = oldX end
-        if treeAt(player.x, player.y) then player.y = oldY end
-
-        if isMoving == false then
-            player.anim:gotoFrame(2)
-        end
-    else
-        -- Hold the idle pose during conversation.
-        player.anim:gotoFrame(2)
+    if player.hp <= 0 then
+        return -- Stop updating the game if the player is dead
     end
 
-    player.anim:update(dt)
+    -- Keep track of player rotation based on mouse position
+    local mouseX, mouseY = love.mouse.getPosition()
+    player.rotation = math.atan2(mouseY - player.y, mouseX - player.x)
 
-    -- Update camera position
-    cam:lookAt(player.x, player.y)
+    -- Randomize which side the enemies come from
+    local side = math.random(1, 4)
+    local spawnX, spawnY
 
-    -- This section prevents the camera from viewing outside the background
-    -- First, get width/height of the game window
-    local w, h = love.graphics.getDimensions()
+    -- Top
+    if side == 1 then
+        spawnX = math.random(0, screenWidth)
+        spawnY = -30
 
-    -- Get the size of the map in pixels
-    local mapW = gameMap.width * gameMap.tilewidth
-    local mapH = gameMap.height * gameMap.tileheight
+    -- Bottom
+    elseif side == 2 then
+        spawnX = math.random(0, screenWidth)
+        spawnY = screenHeight + 30
 
-    -- Keep the camera inside the map
-    cam.x = math.max(w/2, math.min(cam.x, mapW - w/2))
-    cam.y = math.max(h/2, math.min(cam.y, mapH - h/2))
+    -- Left
+    elseif side == 3 then
+        spawnX = -30
+        spawnY = math.random(0, screenHeight)
 
-    myNPC:update(dt)
-    drNPC:update(dt)
-
-    -- Refresh proximity once per frame, only when no dialog is showing.
-    if dialogueOpen then
-        nearbyNPC = nil
-    else
-        nearbyNPC = findNearbyNPC()
+    -- Right
+    elseif side == 4 then
+        spawnX = screenWidth + 30
+        spawnY = math.random(0, screenHeight)
     end
 
-    narrator:update(dt)
-end
+    -- Player movement
+    local moveX, moveY = 0, 0
+    if love.keyboard.isDown("w", "up") then moveY = moveY - 1 end
+    if love.keyboard.isDown("s", "down") then moveY = moveY + 1 end
+    if love.keyboard.isDown("a", "left") then moveX = moveX - 1 end
+    if love.keyboard.isDown("d", "right") then moveX = moveX + 1 end
 
--- Small "E" key hint floating above an NPC's head.
-function drawInteractPrompt(npc)
-    love.graphics.setColor(1, 1, 1)
-    love.graphics.print("Press E", npc.x - 25, npc.y - 60)
+    local moveLength = math.sqrt(moveX^2 + moveY^2)
+    if moveLength > 0 then
+        moveX = moveX / moveLength
+        moveY = moveY / moveLength
+    end
+
+    -- Apply movement to player coordinates
+    player.x = player.x + (moveX * player.speed * dt)
+    player.y = player.y + (moveY * player.speed * dt)
+
+    -- Dash cooldown
+    if player.dashCooldown > 0 then
+        player.dashCooldown = player.dashCooldown - dt
+    end
+
+    if love.keyboard.isDown("space") and player.dashCooldown <= 0 then
+        player.vx = math.cos(player.rotation) * player.dashForce
+        player.vy = math.sin(player.rotation) * player.dashForce
+
+        -- Reset dash cooldown timer
+        player.dashCooldown = player.dashDelay
+    end
+
+    -- Apply velocity to player movement by adding it
+    player.x = player.x + (player.vx * dt)
+    player.y = player.y + (player.vy * dt)
+
+    -- Apply friction to player movement by subtracting it
+    player.vx = player.vx - (player.vx * player.friction * dt)
+    player.vy = player.vy - (player.vy * player.friction * dt)
+
+    -- Keep player on screen
+    player.x = math.max(0, math.min(player.x, screenWidth - player.radius))
+    player.y = math.max(0, math.min(player.y, screenHeight - player.radius))
+
+    -- Spawn enemies
+    enemySpawnTimer = enemySpawnTimer + dt
+    if enemySpawnTimer >= enemySpawnRate then
+        enemySpawnTimer = 0
+        
+        -- Spawn enemy at a random location at the top of the screen for simplicity
+        local newEnemy = {
+            x = spawnX,
+            y = spawnY,
+            speed = 150,
+            radius = 12
+        }
+        table.insert(enemies, newEnemy)
+    end
+
+    -- Enemy movement
+    -- Loop backwards through table to remove dead enemies
+    for i = #enemies, 1, -1 do
+        local e = enemies[i]
+        
+        -- Calculate the angle between the enemy and the player
+        local angle = math.atan2(player.y - e.y, player.x - e.x)
+        
+        -- Move the enemy toward the player using the angle
+        e.x = e.x + math.cos(angle) * e.speed * dt
+        e.y = e.y + math.sin(angle) * e.speed * dt
+
+        -- Check if enemy touched the player
+        if getDistance(player.x, player.y, e.x, e.y) < player.radius + e.radius then
+            player.hp = player.hp - 10
+            table.remove(enemies, i) -- Remove the enemy that hit the player
+        end
+    end
+
+    -- Automatic shooting
+    shootTimer = shootTimer + dt
+    if shootTimer >= shootRate and #enemies > 0 then
+        shootTimer = 0
+
+        -- Find the closest enemy
+        local closestEnemy = nil
+        local shortestDistance = math.huge -- Start with an infinitely large distance
+
+        for _, e in ipairs(enemies) do
+            local dist = getDistance(player.x, player.y, e.x, e.y)
+            if dist < shortestDistance then
+                shortestDistance = dist
+                closestEnemy = e
+            end
+        end
+
+        -- If we found a target, then we create a bullet aiming at it
+        if closestEnemy then
+            local perfectAngle = math.atan2(closestEnemy.y - player.y, closestEnemy.x - player.x)
+            local maxSpread = 0.5
+            local finalAngle = perfectAngle + (math.random() - 0.5) * maxSpread
+            
+            local newBullet = {
+                x = player.x,
+                y = player.y,
+                dx = math.cos(finalAngle),
+                dy = math.sin(finalAngle),
+                speed = 400,
+                radius = 5
+            }
+            table.insert(bullets, newBullet)
+        end
+    end
+
+    -- Movement of bullets + enemy collision
+    for b_idx = #bullets, 1, -1 do
+        local b = bullets[b_idx]
+        
+        -- Move the bullet
+        b.x = b.x + b.dx * b.speed * dt
+        b.y = b.y + b.dy * b.speed * dt
+
+        -- Remove bullet if it goes off screen
+        if b.x < 0 or b.x > screenWidth or b.y < 0 or b.y > screenHeight then
+            table.remove(bullets, b_idx)
+        else
+            -- Check for collision with enemies
+            local hit = false
+            for e_idx = #enemies, 1, -1 do
+                local e = enemies[e_idx]
+                
+                if getDistance(b.x, b.y, e.x, e.y) < b.radius + e.radius then
+                    -- Bullet hit an enemy, remove both and increase score
+                    table.remove(enemies, e_idx)
+                    hit = true
+                    score = score + 1
+                    break -- Stop checking other enemies for this bullet
+                end
+            end
+
+            -- If the bullet hit something, remove the bullet
+            if hit then
+                table.remove(bullets, b_idx)
+            end
+        end
+    end
 end
 
 function love.draw()
-    cam:attach()
-        gameMap:drawLayer(gameMap.layers["Ground"])
-        player.anim:draw(player.spriteSheet, player.x, player.y, nil, 6, nil, 6, 9)
-        myNPC:draw()
-        drNPC:draw()
-        gameMap:drawLayer(gameMap.layers["Trees"])
+    -- Draw background
+    love.graphics.clear(0.1, 0.1, 0.15) -- Dark bluish-grey baackground
 
-        if nearbyNPC then
-            drawInteractPrompt(nearbyNPC)
-        end
-    cam:detach()
-
-    love.graphics.print("x = " .. math.floor(player.x) .. " y = " .. math.floor(player.y), 10, 10)
-
-    -- Dialogue UI is drawn last so it sits on top of everything.
-    narrator:draw()
-end
-
-function love.keypressed(key)
-    if key == "escape" then
-        love.event.quit()
+    if player.hp <= 0 then
+        love.graphics.setColor(1, 0, 0)
+        love.graphics.print("GAME OVER! Score: " .. score, screenWidth/2 - 50, screenHeight/2)
+        return
     end
 
-    if narrator:isOpen() then
-        -- Inside a dialog: advance / pick options.
-        if key == "space" or key == "return" then
-            narrator:onAction()
-        elseif key == "up" then
-            narrator:prevOption()
-        elseif key == "down" then
-            narrator:nextOption()
-        end
-    else
-        -- Outside a dialog: E starts a conversation with the closest NPC.
-        if key == "e" and nearbyNPC then
-            narrator:startScript(nearbyNPC)
-        end
+    -- Draw player (green)
+    love.graphics.setColor(0, 1, 0)
+    love.graphics.circle("fill", player.x, player.y, player.radius)
+
+    -- Draw enemies (red)
+    love.graphics.setColor(1, 0, 0)
+    for _, e in ipairs(enemies) do
+        love.graphics.circle("fill", e.x, e.y, e.radius)
     end
+
+    -- Draw bullets (yellow)
+    love.graphics.setColor(1, 1, 0)
+    for _, b in ipairs(bullets) do
+        love.graphics.circle("fill", b.x, b.y, b.radius)
+    end
+
+    -- Draw UI/text
+    love.graphics.setColor(1, 1, 1) -- White
+    love.graphics.print("HP: " .. player.hp, 10, 10)
+    love.graphics.print("Score: " .. score, 10, 30)
 end
